@@ -1,0 +1,9 @@
+# wrangler.toml
+name = "tele-upload-bot"
+main = "tele-upload.js"
+compatibility_date = "2025-01-01"
+
+# KV untuk menyimpan state percakapan & folder default user
+[[kv_namespaces]]
+binding = "BOT_STATE"
+id = "ef07dcdc00c047ac8dd5dee551ca7a44"
