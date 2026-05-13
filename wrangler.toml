@@ -6,4 +6,4 @@ compatibility_date = "2025-01-01"
 # KV untuk menyimpan state percakapan & folder default user
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "ef07dcdc00c047ac8dd5dee551ca7a44"
+id = "74cf9da380d544adb807ef5a38b36aec"
