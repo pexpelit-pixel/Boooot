@@ -1,5 +1,5 @@
 # wrangler.toml
-name = "tele-upload-bot"
+name = "tele-upload"
 main = "tele-upload.js"
 compatibility_date = "2025-01-01"
 
