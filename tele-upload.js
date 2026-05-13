@@ -146,6 +146,23 @@ export default {
         // START
         // =========================
 
+        if (msg.text === "/cancel") {
+
+  await env.SESSIONS.delete(
+    `session_${msg.chat.id}`
+  );
+
+  await sendMessage(
+    BOT_TOKEN,
+    msg.chat.id,
+    "Upload dibatalkan."
+  );
+
+  return Response.json({
+    ok: true
+  });
+}
+
         if (msg.text === "/start") {
 
           await sendMessage(
