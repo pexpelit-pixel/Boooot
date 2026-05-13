@@ -1,246 +1,476 @@
-// tele-upload.js
+// workers.js
+// Telegram Upload Bot for Cloudflare Workers
+
 export default {
   async fetch(request, env) {
-    // GET request = health check
-    if (request.method === "GET") {
-      return new Response("Bot is running ✅", { status: 200 });
+
+    const BOT_TOKEN = env.BOT_TOKEN;
+    const WEBHOOK_SECRET = env.WEBHOOK_SECRET || "secret";
+
+    const UPLOAD_URL =
+      "https://bokepflix.sakittakberdarah.workers.dev/api/upload/file";
+
+    const FOLDERS_URL =
+      "https://bokepflix.sakittakberdarah.workers.dev/api/folders";
+
+    const url = new URL(request.url);
+
+    // =========================
+    // SET WEBHOOK
+    // =========================
+
+    if (url.pathname === "/setup") {
+
+      const webhookUrl =
+        `${url.origin}/telegram/${WEBHOOK_SECRET}`;
+
+      const tg = await fetch(
+        `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            url: webhookUrl
+          })
+        }
+      );
+
+      return Response.json(await tg.json());
     }
 
-    // POST dari Telegram
-    if (request.method === "POST") {
-      try {
-        const body = await request.json();
+    // =========================
+    // WEBHOOK
+    // =========================
 
-        // Abaikan update tanpa message/callback_query
-        if (!body.message && !body.callback_query) {
-          return new Response("OK");
+    if (
+      request.method === "POST" &&
+      url.pathname === `/telegram/${WEBHOOK_SECRET}`
+    ) {
+
+      const update = await request.json();
+
+      const msg =
+        update.message ||
+        update.edited_message;
+
+      const callback =
+        update.callback_query;
+
+      // =========================
+      // CALLBACK BUTTON
+      // =========================
+
+      if (callback) {
+
+        const chatId =
+          callback.message.chat.id;
+
+        const data = callback.data || "";
+
+        if (data.startsWith("folder_")) {
+
+          const sessionKey =
+            `session_${chatId}`;
+
+          const session =
+            JSON.parse(
+              await env.SESSIONS.get(sessionKey)
+            );
+
+          session.folder =
+            data.replace("folder_", "");
+
+          await env.SESSIONS.put(
+            sessionKey,
+            JSON.stringify(session),
+            {
+              expirationTtl: 3600
+            }
+          );
+
+          await fetch(
+            `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({
+                callback_query_id: callback.id
+              })
+            }
+          );
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Uploading video..."
+          );
+
+          await uploadVideo(
+            env,
+            BOT_TOKEN,
+            chatId,
+            session
+          );
+
+          return Response.json({
+            ok: true
+          });
+        }
+      }
+
+      // =========================
+      // MESSAGE
+      // =========================
+
+      if (msg) {
+
+        const chatId =
+          msg.chat.id;
+
+        const sessionKey =
+          `session_${chatId}`;
+
+        const sessionRaw =
+          await env.SESSIONS.get(sessionKey);
+
+        let session =
+          sessionRaw
+            ? JSON.parse(sessionRaw)
+            : null;
+
+        // =========================
+        // START
+        // =========================
+
+        if (msg.text === "/start") {
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Kirim video/document video."
+          );
+
+          return Response.json({
+            ok: true
+          });
         }
 
-        return await handleUpdate(body, env);
-      } catch (err) {
-        // Log error lengkap
-        console.error("Error processing update:", err.message, err.stack);
-        return new Response("OK"); // Tetap return 200 agar Telegram tidak resend
+        // =========================
+        // VIDEO RECEIVED
+        // =========================
+
+        if (
+          msg.video ||
+          msg.document
+        ) {
+
+          const media =
+            msg.video || msg.document;
+
+          session = {
+            step: "title",
+            fileId: media.file_id
+          };
+
+          await env.SESSIONS.put(
+            sessionKey,
+            JSON.stringify(session),
+            {
+              expirationTtl: 3600
+            }
+          );
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Masukkan judul:"
+          );
+
+          return Response.json({
+            ok: true
+          });
+        }
+
+        // =========================
+        // TITLE
+        // =========================
+
+        if (
+          session &&
+          session.step === "title"
+        ) {
+
+          session.title =
+            msg.text;
+
+          session.step =
+            "description";
+
+          await env.SESSIONS.put(
+            sessionKey,
+            JSON.stringify(session),
+            {
+              expirationTtl: 3600
+            }
+          );
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Masukkan deskripsi:"
+          );
+
+          return Response.json({
+            ok: true
+          });
+        }
+
+        // =========================
+        // DESCRIPTION
+        // =========================
+
+        if (
+          session &&
+          session.step === "description"
+        ) {
+
+          session.description =
+            msg.text;
+
+          session.step =
+            "tags";
+
+          await env.SESSIONS.put(
+            sessionKey,
+            JSON.stringify(session),
+            {
+              expirationTtl: 3600
+            }
+          );
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Masukkan tags:"
+          );
+
+          return Response.json({
+            ok: true
+          });
+        }
+
+        // =========================
+        // TAGS
+        // =========================
+
+        if (
+          session &&
+          session.step === "tags"
+        ) {
+
+          session.tags =
+            msg.text;
+
+          session.step =
+            "folder";
+
+          await env.SESSIONS.put(
+            sessionKey,
+            JSON.stringify(session),
+            {
+              expirationTtl: 3600
+            }
+          );
+
+          const folderReq =
+            await fetch(FOLDERS_URL);
+
+          const folderJson =
+            await folderReq.json();
+
+          const folders =
+            folderJson.result || [];
+
+          const buttons =
+            folders.map(f => [{
+              text:
+                `${f.name} (${f.fld_id})`,
+              callback_data:
+                `folder_${f.fld_id}`
+            }]);
+
+          await sendMessage(
+            BOT_TOKEN,
+            chatId,
+            "Pilih folder:",
+            {
+              inline_keyboard:
+                buttons
+            }
+          );
+
+          return Response.json({
+            ok: true
+          });
+        }
       }
+
+      return Response.json({
+        ok: true
+      });
     }
 
-    return new Response("Method not allowed", { status: 405 });
-  },
+    return new Response("Not Found", {
+      status: 404
+    });
+  }
 };
 
-async function handleUpdate(update, env) {
-  const msg = update.message;
-  const chatId = msg?.chat?.id;
-  const text = msg?.text?.trim() || "";
-  const fileInfo = msg?.document || msg?.video;
-  const apiBase = env.API_BASE || "https://xstreaming.hanadrophtml.workers.dev";
+// =========================
+// SEND MESSAGE
+// =========================
 
-  console.log("Update:", { chatId, text, hasFile: !!fileInfo });
+async function sendMessage(
+  BOT_TOKEN,
+  chatId,
+  text,
+  keyboard = null
+) {
 
-  if (!chatId) {
-    console.log("No chatId, skipping");
-    return new Response("OK");
+  const body = {
+    chat_id: chatId,
+    text
+  };
+
+  if (keyboard) {
+    body.reply_markup = keyboard;
   }
 
-  // ---- commands outside state ----
-  if (text.startsWith("/start")) {
-    return sendMessage(chatId, "👋 Halo! Saya bot upload XStreaming.\n\nPerintah:\n/upload_url <link> [judul] [tag1,tag2]\n/folders - lihat folder\n/folder <id> - set folder default\n/cancel - batalkan proses\n\nAtau kirim langsung file video.", env);
-  }
-
-  if (text.startsWith("/folders")) {
-    try {
-      const res = await fetch(`${apiBase}/api/folders`);
-      const data = await res.json();
-      const folders = data?.result?.folders || data?.result || [];
-      if (!Array.isArray(folders)) {
-        return sendMessage(chatId, "❌ Gagal ambil folder: format tak terduga", env);
-      }
-      const list = folders.map(f => `🆔 ${f.fld_id} – ${f.name || "Tanpa Nama"}`).join("\n") || "Folder kosong";
-      return sendMessage(chatId, `📁 Folder yang tersedia:\n${list}`, env);
-    } catch (e) {
-      console.error("/folders error:", e);
-      return sendMessage(chatId, "❌ Gagal ambil folder: " + e.message, env);
-    }
-  }
-
-  if (text.startsWith("/cancel")) {
-    await env.BOT_STATE.delete(`chat:${chatId}`);
-    return sendMessage(chatId, "❌ Proses dibatalkan.", env);
-  }
-
-  // ---- upload url langsung ----
-  if (text.startsWith("/upload_url")) {
-    const args = text.split(" ").slice(1);
-    if (!args[0]) return sendMessage(chatId, "❌ Gunakan: /upload_url <link> [judul] [tag1,tag2]", env);
-    const url = args[0];
-    const title = args[1] || "";
-    const tags = args.slice(2).join(" ") || "";
-    return uploadFromUrl(chatId, url, title, tags, apiBase, env);
-  }
-
-  // ---- folder default ----
-  if (text.startsWith("/folder")) {
-    const fld = text.split(" ")[1] || "0";
-    try {
-      await env.BOT_STATE.put(`folder:${chatId}`, fld, { expirationTtl: 86400 * 30 });
-    } catch (e) {
-      console.error("Save folder error:", e);
-    }
-    return sendMessage(chatId, `✅ Folder default di-set ke *${fld}*`, env);
-  }
-
-  // ---- handle state dialog ----
-  const stateKey = `chat:${chatId}`;
-  let currentState = null;
-  try {
-    currentState = await env.BOT_STATE.get(stateKey, { type: "json" });
-  } catch (e) {
-    console.error("Get state error:", e);
-  }
-
-  // kalau ada file dan tidak dalam state
-  if (fileInfo && !currentState) {
-    const fileId = fileInfo.file_id;
-    try {
-      await env.BOT_STATE.put(stateKey, JSON.stringify({
-        state: "AWAIT_TITLE",
-        file_id: fileId,
-        data: {}
-      }), { expirationTtl: 600 });
-    } catch (e) {
-      console.error("Save state error:", e);
-    }
-    return sendMessage(chatId, "📁 File video diterima. Sekarang kirim *judul* video.", env);
-  }
-
-  if (currentState) {
-    const { state, file_id, data } = currentState;
-
-    switch (state) {
-      case "AWAIT_TITLE":
-        data.title = text || "Untitled";
-        await env.BOT_STATE.put(stateKey, JSON.stringify({
-          state: "AWAIT_TAGS",
-          file_id,
-          data
-        }), { expirationTtl: 600 });
-        return sendMessage(chatId, "🏷️ Sekarang kirim *tag* (pisahkan koma). Atau kirim `-` untuk kosong.", env);
-
-      case "AWAIT_TAGS":
-        data.tags = text === "-" ? "" : text;
-        await env.BOT_STATE.put(stateKey, JSON.stringify({
-          state: "AWAIT_FOLDER",
-          file_id,
-          data
-        }), { expirationTtl: 600 });
-        return sendMessage(chatId, "📂 Masukkan *folder ID* (0 = root).", env);
-
-      case "AWAIT_FOLDER":
-        data.fld_id = text || "0";
-        await env.BOT_STATE.delete(stateKey);
-        return uploadFile(chatId, file_id, data.title, data.tags, data.fld_id, apiBase, env);
-
-      default:
-        await env.BOT_STATE.delete(stateKey);
-        return sendMessage(chatId, "⚠️ State tidak valid, dibatalkan.", env);
-    }
-  }
-
-  // Tidak ada yang cocok
-  return sendMessage(chatId, "Ketik /start untuk bantuan.", env);
-}
-
-// ---------- helpers ----------
-
-async function sendMessage(chatId, text, env) {
-  const token = env.BOT_TOKEN;
-  if (!token) {
-    console.error("BOT_TOKEN not set!");
-    return new Response("OK");
-  }
-
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  await fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+    {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: "Markdown",
-      }),
-    });
-    const json = await res.json();
-    if (!json.ok) {
-      console.error("Telegram API error:", json);
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(body)
     }
-  } catch (e) {
-    console.error("sendMessage error:", e.message);
-  }
-
-  return new Response("OK");
+  );
 }
 
-async function getDefaultFolder(chatId, env) {
-  try {
-    const saved = await env.BOT_STATE.get(`folder:${chatId}`);
-    return saved || "0";
-  } catch {
-    return "0";
-  }
-}
+// =========================
+// UPLOAD VIDEO
+// =========================
 
-async function uploadFromUrl(chatId, url, title, tags, apiBase, env) {
-  try {
-    const res = await fetch(`${apiBase}/api/upload/url`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url,
-        new_title: title,
-        tags,
-        fld_id: await getDefaultFolder(chatId, env)
-      }),
-    });
-    const data = await res.json();
-    await sendMessage(chatId, "✅ Upload URL berhasil!\n\n```\n" + JSON.stringify(data, null, 2).slice(0, 3500) + "\n```", env);
-  } catch (e) {
-    await sendMessage(chatId, "❌ Gagal upload: " + e.message, env);
-  }
-  return new Response("OK");
-}
-
-async function uploadFile(chatId, fileId, title, tags, fld_id, apiBase, env) {
-  const token = env.BOT_TOKEN;
-  if (!token) {
-    return sendMessage(chatId, "❌ BOT_TOKEN belum diset", env);
-  }
+async function uploadVideo(
+  env,
+  BOT_TOKEN,
+  chatId,
+  session
+) {
 
   try {
-    // Download dari Telegram
-    const fileRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`);
-    const fileJson = await fileRes.json();
-    if (!fileJson.ok) throw new Error("Gagal ambil file: " + fileJson.description);
 
-    const filePath = fileJson.result.file_path;
-    const downloadUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
-    const fileBlob = await fetch(downloadUrl).then(r => r.blob());
+    const tgFile =
+      await fetch(
+        `https://api.telegram.org/bot${BOT_TOKEN}/getFile`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            file_id: session.fileId
+          })
+        }
+      );
 
-    // Upload ke worker utama
-    const form = new FormData();
-    form.append("file", fileBlob, filePath.split("/").pop() || "video.mp4");
-    form.append("new_title", title);
-    form.append("tags", tags);
-    form.append("fld_id", fld_id || "0");
+    const tgJson =
+      await tgFile.json();
 
-    const uploadRes = await fetch(`${apiBase}/api/upload/file`, {
-      method: "POST",
-      body: form,
-    });
-    const result = await uploadRes.json();
-    await sendMessage(chatId, "✅ Upload file berhasil!\n\n```\n" + JSON.stringify(result, null, 2).slice(0, 3500) + "\n```", env);
-  } catch (e) {
-    console.error("uploadFile error:", e);
-    await sendMessage(chatId, "❌ Gagal upload: " + e.message, env);
+    const filePath =
+      tgJson.result.file_path;
+
+    const fileUrl =
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+
+    const videoReq =
+      await fetch(fileUrl);
+
+    const videoBlob =
+      await videoReq.blob();
+
+    const form =
+      new FormData();
+
+    form.append(
+      "file",
+      videoBlob,
+      "video.mp4"
+    );
+
+    form.append(
+      "title",
+      session.title || ""
+    );
+
+    form.append(
+      "description",
+      session.description || ""
+    );
+
+    form.append(
+      "tags",
+      session.tags || ""
+    );
+
+    form.append(
+      "fld_id",
+      session.folder || "0"
+    );
+
+    const uploadReq =
+      await fetch(
+        "https://bokepflix.sakittakberdarah.workers.dev/api/upload/file",
+        {
+          method: "POST",
+          body: form
+        }
+      );
+
+    const uploadJson =
+      await uploadReq.json();
+
+    const item =
+      uploadJson?.result?.result?.[0] || {};
+
+    await sendMessage(
+      BOT_TOKEN,
+      chatId,
+      [
+        "UPLOAD BERHASIL ✅",
+        "",
+        `Title: ${item.title || "-"}`,
+        `File Code: ${item.filecode || "-"}`,
+        "",
+        `Embed:`,
+        item.protected_embed || "-",
+        "",
+        `Download:`,
+        item.download_url || "-"
+      ].join("\n")
+    );
+
+  } catch (err) {
+
+    await sendMessage(
+      BOT_TOKEN,
+      chatId,
+      `Upload gagal:\n${err.message || err}`
+    );
   }
-  return new Response("OK");
 }
